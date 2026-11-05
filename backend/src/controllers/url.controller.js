@@ -1,119 +1,164 @@
+
 const mongoose = require("mongoose");
 const Url = require("../models/url.model");
 const generateShortCode = require("../utils/generateShortCode");
 
+// Generate the public short URL
+const getShortUrl = (shortCode) => {
+    const backendUrl = (
+        process.env.BACKEND_URL ||
+        "http://localhost:5000"
+    ).replace(/\/+$/, "");
 
+    return `${backendUrl}/${shortCode}`;
+};
+
+// CREATE SHORT URL
 const createShortUrl = async (req, res) => {
-    const { originalUrl, customCode, expiresAt } = req.body;
+    try {
+        let { originalUrl, customCode, expiresAt } = req.body;
 
-    if (!originalUrl) {
-        return res.status(400).json({
-            success: false,
-            message: "Original URL is required"
-        });
-    }
-
-    if (typeof originalUrl !== "string") {
-        return res.status(400).json({
-            success: false,
-            message: "Original URL must be a string"
-        });
-    }
-
-
-    if (customCode !== undefined) {
-        if (typeof customCode !== "string") {
+        // Validate original URL
+        if (!originalUrl || typeof originalUrl !== "string") {
             return res.status(400).json({
                 success: false,
-                message: "Custom code must be a string"
+                message: "Original URL is required"
             });
         }
 
-        if (!/^[a-zA-Z0-9_-]+$/.test(customCode)) {
+        originalUrl = originalUrl.trim();
+
+        let parsedUrl;
+
+        try {
+            parsedUrl = new URL(originalUrl);
+
+            if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+                throw new Error("Invalid protocol");
+            }
+        } catch {
             return res.status(400).json({
-                message: "Custom code can only contain letters, numbers, hyphens, and underscores"
+                success: false,
+                message: "Please enter a valid HTTP or HTTPS URL"
             });
         }
 
-        if (customCode.length < 3 || customCode.length > 30) {
-            return res.status(400).json({
-                message: "Custom code must be between 3 and 30 characters"
-            });
-        }
-    }
+        // Validate custom alias
+        customCode =
+            typeof customCode === "string"
+                ? customCode.trim()
+                : customCode;
 
-    if (expiresAt !== undefined && expiresAt !== null) {
-        const expirationDate = new Date(expiresAt);
-
-        if (isNaN(expirationDate.getTime())) {
-            return res.status(400).json({
-                message: "Invalid expiration date"
-            });
+        if (customCode === "") {
+            customCode = null;
         }
 
-        if (expirationDate <= new Date()) {
-            return res.status(400).json({
-                message: "Expiration date must be in the future"
-            });
+        if (customCode !== undefined && customCode !== null) {
+            if (typeof customCode !== "string") {
+                return res.status(400).json({
+                    success: false,
+                    message: "Custom code must be a string"
+                });
+            }
+
+            if (!/^[a-zA-Z0-9_-]+$/.test(customCode)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Custom code can only contain letters, numbers, hyphens, and underscores"
+                });
+            }
+
+            if (customCode.length < 3 || customCode.length > 30) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Custom code must be between 3 and 30 characters"
+                });
+            }
         }
-    }
 
-    try {
-        const url = new URL(originalUrl);
+        // Validate expiration date
+        let expirationDate = null;
 
-        if (url.protocol !== "http:" && url.protocol !== "https:") {
-            return res.status(400).json({
-                message: "Only HTTP and HTTPS URLs are allowed"
-            });
+        if (expiresAt !== undefined && expiresAt !== null && expiresAt !== "") {
+            expirationDate = new Date(expiresAt);
+
+            if (isNaN(expirationDate.getTime())) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Invalid expiration date"
+                });
+            }
+
+            if (expirationDate <= new Date()) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Expiration date must be in the future"
+                });
+            }
         }
 
+        // Generate short code
         const shortCode = customCode || generateShortCode();
 
-        const existingUrl = await Url.findOne({
-            shortCode: shortCode
-        });
+        // Check duplicate short code
+        const existingUrl = await Url.findOne({ shortCode });
 
-        if (existingUrl) { 
+        if (existingUrl) {
             return res.status(409).json({
                 success: false,
-                message: "Short code already exists. Please choose a different one."
+                message: "Short code already exists. Please choose another."
             });
-        }   
+        }
 
+        // Save URL
         const newUrl = await Url.create({
-            originalUrl: url.toString(),
-            shortCode: shortCode,
+            originalUrl: parsedUrl.toString(),
+            shortCode,
             customCode: customCode || null,
-            expiresAt : expiresAt ? new Date(expiresAt) : null
+            expiresAt: expirationDate
         });
 
-        res.status(201).json({
-            success : true,
+        return res.status(201).json({
+            success: true,
             message: "Short URL created successfully",
             data: {
+                id: newUrl._id,
                 shortCode: newUrl.shortCode,
-                shortUrl: `http://localhost:5000/${newUrl.shortCode}`,
+                shortUrl: getShortUrl(newUrl.shortCode),
                 originalUrl: newUrl.originalUrl,
                 customCode: newUrl.customCode,
-                expiresAt: newUrl.expiresAt
+                expiresAt: newUrl.expiresAt,
+                clicks: newUrl.clicks,
+                createdAt: newUrl.createdAt
             }
-            
         });
 
     } catch (error) {
         console.error("Error creating short URL:", error);
 
+        if (error.code === 11000) {
+            return res.status(409).json({
+                success: false,
+                message: "This short code already exists. Please try again."
+            });
+        }
+
         return res.status(500).json({
-            message: "Internal server error"
+            success: false,
+            message: "Internal server error",
+            error: process.env.NODE_ENV === "development"
+                ? error.message
+                : undefined
         });
     }
 };
 
 
+// GET URL BY ID
 const getUrlById = async (req, res) => {
     const { id } = req.params;
 
-    if ( !mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({
             success: false,
             message: "Invalid URL ID"
@@ -121,7 +166,6 @@ const getUrlById = async (req, res) => {
     }
 
     try {
-
         const url = await Url.findById(id);
 
         if (!url) {
@@ -132,23 +176,25 @@ const getUrlById = async (req, res) => {
         }
 
         return res.status(200).json({
-            success : true,
-            data: url
-            
+            success: true,
+            data: {
+                ...url.toObject(),
+                shortUrl: getShortUrl(url.shortCode)
+            }
         });
-    }
-    catch(error) {
-        console.error("Error fetching URL :", error);
+
+    } catch (error) {
+        console.error("Error fetching URL:", error);
 
         return res.status(500).json({
             success: false,
             message: "Internal server error"
         });
     }
-
-
 };
 
+
+// GET URL ANALYTICS
 const getUrlAnalytics = async (req, res) => {
     const { id } = req.params;
 
@@ -175,6 +221,7 @@ const getUrlAnalytics = async (req, res) => {
             success: true,
             data: {
                 shortCode: url.shortCode,
+                shortUrl: getShortUrl(url.shortCode),
                 originalUrl: url.originalUrl,
                 customCode: url.customCode,
                 clicks: url.clicks,
@@ -195,19 +242,11 @@ const getUrlAnalytics = async (req, res) => {
 };
 
 
-
+// GET ALL URLS
 const getAllUrls = async (req, res) => {
     try {
-        const pageParam = req.query.page;
-        const limitParam = req.query.limit;
-
-        const page = pageParam === undefined
-            ? 1
-            : Number(pageParam);
-
-        const limit = limitParam === undefined
-            ? 10
-            : Number(limitParam);
+        const page = Number(req.query.page ?? 1);
+        const limit = Number(req.query.limit ?? 10);
 
         if (!Number.isInteger(page) || page < 1) {
             return res.status(400).json({
@@ -219,26 +258,34 @@ const getAllUrls = async (req, res) => {
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
             return res.status(400).json({
                 success: false,
-                message: "Limit must be an integer between 1 and 100"
+                message: "Limit must be between 1 and 100"
             });
         }
 
         const skip = (page - 1) * limit;
 
-        const urls = await Url.find()
-            .sort({ createdAt: -1 })
-            .skip(skip)
-            .limit(limit);
+        const [urls, totalUrls] = await Promise.all([
+            Url.find()
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
 
-        const totalUrls = await Url.countDocuments();
+            Url.countDocuments()
+        ]);
+
+        const formattedUrls = urls.map((url) => ({
+            ...url,
+            shortUrl: getShortUrl(url.shortCode)
+        }));
 
         return res.status(200).json({
             success: true,
-            data: urls,
+            data: formattedUrls,
             pagination: {
                 currentPage: page,
-                limit: limit,
-                totalUrls: totalUrls,
+                limit,
+                totalUrls,
                 totalPages: Math.ceil(totalUrls / limit)
             }
         });
@@ -254,8 +301,10 @@ const getAllUrls = async (req, res) => {
 };
 
 
+// UPDATE URL
 const updateUrl = async (req, res) => {
     const { id } = req.params;
+    const { originalUrl, customCode, expiresAt } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({
@@ -263,8 +312,6 @@ const updateUrl = async (req, res) => {
             message: "Invalid URL ID"
         });
     }
-
-    const { originalUrl, customCode, expiresAt } = req.body;
 
     try {
         const url = await Url.findById(id);
@@ -276,65 +323,57 @@ const updateUrl = async (req, res) => {
             });
         }
 
-        // Validate originalUrl if provided
+        // Update original URL
         if (originalUrl !== undefined) {
-            if (typeof originalUrl !== "string") {
+            if (typeof originalUrl !== "string" || !originalUrl.trim()) {
                 return res.status(400).json({
                     success: false,
-                    message: "Original URL must be a string"
+                    message: "Original URL must be a valid string"
                 });
             }
+
+            let parsedUrl;
 
             try {
-                const parsedUrl = new URL(originalUrl);
+                parsedUrl = new URL(originalUrl.trim());
 
-                if (
-                    parsedUrl.protocol !== "http:" &&
-                    parsedUrl.protocol !== "https:"
-                ) {
-                    return res.status(400).json({
-                        success: false,
-                        message: "Only HTTP and HTTPS URLs are allowed"
-                    });
+                if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+                    throw new Error("Invalid protocol");
                 }
-
-                url.originalUrl = parsedUrl.toString();
-
-            } catch (error) {
+            } catch {
                 return res.status(400).json({
                     success: false,
-                    message: "Invalid URL"
+                    message: "Invalid HTTP or HTTPS URL"
                 });
             }
+
+            url.originalUrl = parsedUrl.toString();
         }
 
-        // Validate customCode if provided
+        // Update custom alias
         if (customCode !== undefined) {
-            if (typeof customCode !== "string") {
+            const code = typeof customCode === "string"
+                ? customCode.trim()
+                : customCode;
+
+            if (code === "") {
                 return res.status(400).json({
                     success: false,
-                    message: "Custom code must be a string"
+                    message: "Custom code cannot be empty. Use a valid alias."
                 });
             }
 
-            if (!/^[a-zA-Z0-9_-]+$/.test(customCode)) {
+            if (typeof code !== "string" ||
+                !/^[a-zA-Z0-9_-]{3,30}$/.test(code)) {
                 return res.status(400).json({
                     success: false,
-                    message:
-                        "Custom code can only contain letters, numbers, hyphens, and underscores"
+                    message: "Custom code must contain 3-30 letters, numbers, hyphens, or underscores"
                 });
             }
 
-            if (customCode.length < 3 || customCode.length > 30) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Custom code must be between 3 and 30 characters"
-                });
-            }
-
-            if (customCode !== url.shortCode) {
+            if (code !== url.shortCode) {
                 const existingUrl = await Url.findOne({
-                    shortCode: customCode
+                    shortCode: code
                 });
 
                 if (existingUrl) {
@@ -344,30 +383,24 @@ const updateUrl = async (req, res) => {
                     });
                 }
 
-                url.shortCode = customCode;
+                url.shortCode = code;
             }
 
-            url.customCode = customCode;
+            url.customCode = code;
         }
 
-        // Validate expiresAt if provided
+        // Update expiration date
         if (expiresAt !== undefined) {
-            if (expiresAt === null) {
+            if (expiresAt === null || expiresAt === "") {
                 url.expiresAt = null;
             } else {
                 const expirationDate = new Date(expiresAt);
 
-                if (isNaN(expirationDate.getTime())) {
+                if (isNaN(expirationDate.getTime()) ||
+                    expirationDate <= new Date()) {
                     return res.status(400).json({
                         success: false,
-                        message: "Invalid expiration date"
-                    });
-                }
-
-                if (expirationDate <= new Date()) {
-                    return res.status(400).json({
-                        success: false,
-                        message: "Expiration date must be in the future"
+                        message: "Expiration date must be a valid future date"
                     });
                 }
 
@@ -384,6 +417,7 @@ const updateUrl = async (req, res) => {
                 id: url._id,
                 originalUrl: url.originalUrl,
                 shortCode: url.shortCode,
+                shortUrl: getShortUrl(url.shortCode),
                 customCode: url.customCode,
                 expiresAt: url.expiresAt,
                 updatedAt: url.updatedAt
@@ -393,6 +427,13 @@ const updateUrl = async (req, res) => {
     } catch (error) {
         console.error("Error updating URL:", error);
 
+        if (error.code === 11000) {
+            return res.status(409).json({
+                success: false,
+                message: "Short code is already in use"
+            });
+        }
+
         return res.status(500).json({
             success: false,
             message: "Internal server error"
@@ -401,7 +442,8 @@ const updateUrl = async (req, res) => {
 };
 
 
-const deleteUrl  = async (req, res) => {
+// DELETE URL
+const deleteUrl = async (req, res) => {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -411,41 +453,38 @@ const deleteUrl  = async (req, res) => {
         });
     }
 
+    try {
+        const url = await Url.findByIdAndDelete(id);
 
-try {
-    const url = await Url.findById(id);
+        if (!url) {
+            return res.status(404).json({
+                success: false,
+                message: "URL not found"
+            });
+        }
 
-    if (!url) {
-        return res.status(400).json({
+        return res.status(200).json({
+            success: true,
+            message: "URL deleted successfully"
+        });
+
+    } catch (error) {
+        console.error("Error deleting URL:", error);
+
+        return res.status(500).json({
             success: false,
-            message: "URL not found"
+            message: "Internal server error"
         });
     }
-    await Url.findByIdAndDelete(id);
-
-    return res.status(200).json({
-        success: true,
-        message: "URL deleted successfully"
-    });
-}
-catch (error) {
-    console.error("Error deleting URL:", error);
-
-    return res.status(500).json({
-        success: false,
-        message: "Internal server error"
-    });
-}
 };
 
 
+// REDIRECT TO ORIGINAL URL
 const redirectToOriginalUrl = async (req, res) => {
     const { shortCode } = req.params;
 
     try {
-        const url = await Url.findOne({
-            shortCode: shortCode
-        });
+        const url = await Url.findOne({ shortCode });
 
         if (!url) {
             return res.status(404).json({
@@ -454,31 +493,31 @@ const redirectToOriginalUrl = async (req, res) => {
             });
         }
 
-        if (url.expiresAt && url.expiresAt < new Date()) {
+        if (url.expiresAt && url.expiresAt <= new Date()) {
             return res.status(410).json({
                 success: false,
                 message: "Short URL has expired"
             });
         }
-        
-        // url.clicks += 1;
-        // await url.save();
 
+        // Increment click count
         await Url.updateOne(
             { _id: url._id },
-            { $inc: {clicks: 1}}
+            { $inc: { clicks: 1 } }
         );
 
-        return res.redirect(url.originalUrl);
+        return res.redirect(302, url.originalUrl);
 
     } catch (error) {
         console.error("Error redirecting:", error);
 
         return res.status(500).json({
+            success: false,
             message: "Internal server error"
         });
     }
 };
+
 
 module.exports = {
     createShortUrl,
